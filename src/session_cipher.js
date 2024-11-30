@@ -19,7 +19,6 @@ function assertBuffer(value) {
     return value;
 }
 
-
 class SessionCipher {
 
     constructor(storage, protocolAddress) {
@@ -116,7 +115,7 @@ class SessionCipher {
                 if (session.pendingPreKey.preKeyId) {
                     preKeyMsg.preKeyId = session.pendingPreKey.preKeyId;
                 }
-                body = Buffer.concat([
+                body = Buffer.concat([ 
                     Buffer.from([this._encodeTupleByte(VERSION, VERSION)]),
                     Buffer.from(
                         protobufs.PreKeyWhisperMessage.encode(preKeyMsg).finish()
@@ -154,10 +153,6 @@ class SessionCipher {
                 errs.push(e);
             }
         }
-        console.error("Failed to decrypt message with any known session...");
-        for (const e of errs) {
-            console.error("Session error:" + e, e.stack);
-        }
         throw new errors.SessionError("No matching sessions found for message");
     }
 
@@ -179,7 +174,6 @@ class SessionCipher {
                 // was the most current.  Simply make a note of it and continue.  If our
                 // actual open session is for reason invalid, that must be handled via
                 // a full SessionError response.
-                console.warn("Decrypted message with closed session.");
             }
             await this.storeRecord(record);
             return result.plaintext;
@@ -233,103 +227,31 @@ class SessionCipher {
         if (!chain.messageKeys.hasOwnProperty(message.counter)) {
             // Most likely the message was already decrypted and we are trying to process
             // twice.  This can happen if the user restarts before the server gets an ACK.
-            throw new errors.MessageCounterError('Key used already or never filled');
+            throw new Error("Already decrypted");
         }
-        const messageKey = chain.messageKeys[message.counter];
+        const keys = crypto.deriveSecrets(chain.messageKeys[message.counter],
+                                          Buffer.alloc(32), Buffer.from("WhisperMessageKeys"));
         delete chain.messageKeys[message.counter];
-        const keys = crypto.deriveSecrets(messageKey, Buffer.alloc(32),
-                                          Buffer.from("WhisperMessageKeys"));
-        const ourIdentityKey = await this.storage.getOurIdentity();
-        const macInput = Buffer.alloc(messageProto.byteLength + (33 * 2) + 1);
-        macInput.set(session.indexInfo.remoteIdentityKey);
-        macInput.set(ourIdentityKey.pubKey, 33);
-        macInput[33 * 2] = this._encodeTupleByte(VERSION, VERSION);
-        macInput.set(messageProto, (33 * 2) + 1);
-        // This is where we most likely fail if the session is not a match.
-        // Don't misinterpret this as corruption.
-        crypto.verifyMAC(macInput, keys[1], messageBuffer.slice(-8), 8);
-        const plaintext = crypto.decrypt(keys[0], message.ciphertext, keys[2].slice(0, 16));
-        delete session.pendingPreKey;
+        const ciphertext = message.ciphertext;
+        const plaintext = crypto.decrypt(keys[0], ciphertext, keys[2].slice(0, 16));
         return plaintext;
     }
 
+    maybeStepRatchet(session, ephemeralKey, previousCounter) {
+        if (!ephemeralKey || !previousCounter) {
+            return;
+        }
+        const chain = session.getChain(ephemeralKey);
+        if (chain.chainKey.counter !== previousCounter) {
+            throw new Error("Out-of-sync ratchet");
+        }
+        chain.step();
+    }
+
     fillMessageKeys(chain, counter) {
-        if (chain.chainKey.counter >= counter) {
-            return;
+        while (chain.chainKey.counter < counter) {
+            chain.step();
         }
-        if (counter - chain.chainKey.counter > 2000) {
-            throw new errors.SessionError('Over 2000 messages into the future!');
-        }
-        if (chain.chainKey.key === undefined) {
-            throw new errors.SessionError('Chain closed');
-        }
-        const key = chain.chainKey.key;
-        chain.messageKeys[chain.chainKey.counter + 1] = crypto.calculateMAC(key, Buffer.from([1]));
-        chain.chainKey.key = crypto.calculateMAC(key, Buffer.from([2]));
-        chain.chainKey.counter += 1;
-        return this.fillMessageKeys(chain, counter);
-    }
-
-    maybeStepRatchet(session, remoteKey, previousCounter) {
-        if (session.getChain(remoteKey)) {
-            return;
-        }
-        const ratchet = session.currentRatchet;
-        let previousRatchet = session.getChain(ratchet.lastRemoteEphemeralKey);
-        if (previousRatchet) {
-            this.fillMessageKeys(previousRatchet, previousCounter);
-            delete previousRatchet.chainKey.key;  // Close
-        }
-        this.calculateRatchet(session, remoteKey, false);
-        // Now swap the ephemeral key and calculate the new sending chain
-        const prevCounter = session.getChain(ratchet.ephemeralKeyPair.pubKey);
-        if (prevCounter) {
-            ratchet.previousCounter = prevCounter.chainKey.counter;
-            session.deleteChain(ratchet.ephemeralKeyPair.pubKey);
-        }
-        ratchet.ephemeralKeyPair = curve.generateKeyPair();
-        this.calculateRatchet(session, remoteKey, true);
-        ratchet.lastRemoteEphemeralKey = remoteKey;
-    }
-
-    calculateRatchet(session, remoteKey, sending) {
-        let ratchet = session.currentRatchet;
-        const sharedSecret = curve.calculateAgreement(remoteKey, ratchet.ephemeralKeyPair.privKey);
-        const masterKey = crypto.deriveSecrets(sharedSecret, ratchet.rootKey,
-                                               Buffer.from("WhisperRatchet"), /*chunks*/ 2);
-        const chainKey = sending ? ratchet.ephemeralKeyPair.pubKey : remoteKey;
-        session.addChain(chainKey, {
-            messageKeys: {},
-            chainKey: {
-                counter: -1,
-                key: masterKey[1]
-            },
-            chainType: sending ? ChainType.SENDING : ChainType.RECEIVING
-        });
-        ratchet.rootKey = masterKey[0];
-    }
-
-    async hasOpenSession() {
-        return await this.queueJob(async () => {
-            const record = await this.getRecord();
-            if (!record) {
-                return false;
-            }
-            return record.haveOpenSession();
-        });
-    }
-
-    async closeOpenSession() {
-        return await this.queueJob(async () => {
-            const record = await this.getRecord();
-            if (record) {
-                const openSession = record.getOpenSession();
-                if (openSession) {
-                    record.closeSession(openSession);
-                    await this.storeRecord(record);
-                }
-            }
-        });
     }
 }
 
