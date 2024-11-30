@@ -1,4 +1,3 @@
-
 'use strict';
 
 const BaseKeyType = require('./base_key_type');
@@ -8,7 +7,6 @@ const crypto = require('./crypto');
 const curve = require('./curve');
 const errors = require('./errors');
 const queueJob = require('./queue_job');
-
 
 class SessionBuilder {
 
@@ -43,7 +41,6 @@ class SessionBuilder {
             } else {
                 const openSession = record.getOpenSession();
                 if (openSession) {
-                    console.warn("Closing stale open session for new outgoing prekey bundle");
                     record.closeSession(openSession);
                 }
             }
@@ -58,7 +55,6 @@ class SessionBuilder {
             throw new errors.UntrustedIdentityKeyError(this.addr.id, message.identityKey);
         }
         if (record.getSession(message.baseKey)) {
-            // This just means we haven't replied.
             return;
         }
         const preKeyPair = await this.storage.loadPreKey(message.preKeyId);
@@ -71,7 +67,6 @@ class SessionBuilder {
         }   
         const existingOpenSession = record.getOpenSession();
         if (existingOpenSession) {
-            console.warn("Closing open session in favor of incoming prekey bundle");
             record.closeSession(existingOpenSession);
         }
         record.setSession(await this.initSession(false, preKeyPair, signedPreKeyPair,
@@ -137,9 +132,6 @@ class SessionBuilder {
             closed: -1
         };
         if (isInitiator) {
-            // If we're initiating we go ahead and set our first sending ephemeral key now,
-            // otherwise we figure it out when we first maybeStepRatchet with the remote's
-            // ephemeral key
             this.calculateSendingRatchet(session, theirSignedPubKey);
         }
         return session;
